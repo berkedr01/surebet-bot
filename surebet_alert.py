@@ -3,6 +3,7 @@ import re
 import json
 import time
 import hashlib
+from collections import deque
 
 
 FIXED_LINKS = """https://heylink.me/sekaguncel_
@@ -36,6 +37,73 @@ SEEN_FILE = os.environ.get("SEEN_FILE", "seen.json")
 
 # Artık sadece Vbetholi filtresini kullanıyoruz.
 FILTER_NAME = os.environ.get("FILTER_NAME", "Vbetholi")
+SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
+
+LOG_BUFFER = deque(maxlen=200)
+_ORIGINAL_PRINT = print
+
+
+def bot_log(*values, sep=" ", end="\n", **kwargs) -> None:
+    """Write to Docker stdout and keep a small in-memory Telegram log buffer."""
+    message = sep.join(str(value) for value in values)
+    for line in message.splitlines() or [""]:
+        LOG_BUFFER.append(line)
+    _ORIGINAL_PRINT(*values, sep=sep, end=end, **kwargs)
+
+
+def get_recent_logs(limit: int = 10) -> str:
+    lines = list(LOG_BUFFER)[-max(1, limit):]
+    if not lines:
+        return "Hen\u00fcz log olu\u015fmad\u0131."
+    return "\n".join(lines)
+
+
+def format_threshold(value: float) -> str:
+    return f"{value:g}"
+
+
+def parse_threshold_command(text: str) -> float | None:
+    """Accept a plain number or 'limit NUMBER' from Telegram."""
+    normalized = text.strip().lower().replace(",", ".")
+    parts = normalized.split()
+    if len(parts) == 2 and parts[0].lstrip("/").split("@", 1)[0] == "limit":
+        normalized = parts[1]
+
+    if not re.fullmatch(r"\d+(?:\.\d+)?", normalized):
+        return None
+
+    value = float(normalized)
+    if 0 <= value <= 100:
+        return value
+    return None
+
+
+def load_runtime_threshold(default: float) -> float:
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            value = float(json.load(f)["threshold"])
+        if 0 <= value <= 100:
+            return value
+    except Exception:
+        pass
+    return default
+
+
+def save_runtime_threshold(value: float) -> bool:
+    temp_path = f"{SETTINGS_FILE}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump({"threshold": value}, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, SETTINGS_FILE)
+        return True
+    except Exception as e:
+        bot_log("[AYAR] Limit kaydedilemedi:", e)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        return False
 
 
 def send_telegram(text: str) -> None:
@@ -91,7 +159,7 @@ def initialize_telegram_offset() -> int | None:
     try:
         updates = fetch_telegram_updates()
     except Exception as e:
-        print("[TELEGRAM] Komut bağlantısı kurulamadı:", e)
+        bot_log("[TELEGRAM] Komut bağlantısı kurulamadı:", e)
         return None
 
     if not updates:
@@ -100,11 +168,11 @@ def initialize_telegram_offset() -> int | None:
 
 
 def poll_telegram_commands(offset: int) -> tuple[int, list[str]]:
-    """Yalnızca ayarlı sohbetten gelen dur/devam/restart komutlarını döndür."""
+    """Return supported commands received from the configured Telegram chat."""
     try:
         updates = fetch_telegram_updates(offset)
     except Exception as e:
-        print("[TELEGRAM] Komutlar okunamadı:", e)
+        bot_log("[TELEGRAM] Komutlar okunamadi:", e)
         return offset, []
 
     next_offset = offset
@@ -122,8 +190,13 @@ def poll_telegram_commands(offset: int) -> tuple[int, list[str]]:
             continue
 
         command = text.split()[0].lower().split("@", 1)[0].lstrip("/")
-        if command in {"dur", "devam", "restart"}:
+        if command in {"dur", "devam", "restart", "logs"}:
             commands.append(command)
+            continue
+
+        threshold = parse_threshold_command(text)
+        if threshold is not None:
+            commands.append(f"threshold:{threshold}")
 
     return next_offset, commands
 
@@ -333,11 +406,11 @@ def set_site_filter(page, filter_name: str) -> bool:
         page.wait_for_timeout(800)
 
         selected = sel.locator("option:checked").inner_text()
-        print(f"[FILTRE] secildi -> {selected}")
+        bot_log(f"[FILTRE] secildi -> {selected}")
 
         return True
     except Exception as e:
-        print(f"[FILTRE] Seçilemedi: {filter_name} | Hata: {e}")
+        bot_log(f"[FILTRE] Seçilemedi: {filter_name} | Hata: {e}")
         return False
 
 
@@ -448,84 +521,141 @@ def scrape_rows(page):
     return results
 
 
-def screenshot_rows_group(page, start_i: int, end_i: int, out_path: str) -> bool:
-    """table tbody tr satır aralığını (start_i dahil, end_i hariç) tek görsel olarak kaydet."""
+def screenshot_rows_group(
+    page,
+    start_i: int,
+    end_i: int,
+    out_path: str,
+    expected_profit: float | None = None,
+) -> bool:
+    """Capture one row group without scrolling again while measuring it."""
     rows = page.locator("table tbody tr")
 
     pad_x = int(os.getenv("SS_PAD_X", "6"))
     pad_y = int(os.getenv("SS_PAD_Y", "6"))
-    max_retry = int(os.getenv("SS_RETRY", "3"))
+    max_retry = int(os.getenv("SS_RETRY", "2"))
+    settle_ms = int(os.getenv("SS_SETTLE_MS", "60"))
+    retry_wait_ms = int(os.getenv("SS_RETRY_WAIT_MS", "100"))
 
     for attempt in range(1, max_retry + 1):
-        # İlk satırı görünür alana getir
         try:
-            rows.nth(start_i).scroll_into_view_if_needed(timeout=5000)
-            page.wait_for_timeout(200)
-        except Exception:
-            pass
+            row_count = rows.count()
+            if start_i < 0 or start_i >= row_count or end_i <= start_i:
+                return False
 
-        min_x = min_y = None
-        max_x = max_y = None
+            # Scroll only once. Scrolling for every row mixed bounding boxes
+            # measured at different viewport positions.
+            rows.nth(start_i).evaluate(
+                "el => el.scrollIntoView({block: 'start', inline: 'nearest'})",
+                timeout=3000,
+            )
+            if settle_ms > 0:
+                page.wait_for_timeout(settle_ms)
 
-        for k in range(start_i, end_i):
-            loc = rows.nth(k)
-            try:
-                loc.scroll_into_view_if_needed(timeout=2000)
-            except Exception:
-                pass
+            # Measure every target row atomically at the same scroll position,
+            # then convert viewport coordinates to document coordinates.
+            measured = page.evaluate(
+                """
+                ({ start, end, padX, padY }) => {
+                    const allRows = Array.from(
+                        document.querySelectorAll("table tbody tr")
+                    );
+                    if (start < 0 || start >= allRows.length || end <= start) {
+                        return null;
+                    }
 
-            try:
-                bb = loc.bounding_box()
-            except Exception:
-                bb = None
+                    const targets = allRows.slice(start, Math.min(end, allRows.length));
+                    const rects = [];
 
-            if not bb:
-                continue
+                    for (const row of targets) {
+                        const style = window.getComputedStyle(row);
+                        const rect = row.getBoundingClientRect();
+                        if (
+                            style.display === "none" ||
+                            style.visibility === "hidden" ||
+                            rect.width <= 0 ||
+                            rect.height <= 0
+                        ) {
+                            continue;
+                        }
+                        rects.push({
+                            left: rect.left,
+                            top: rect.top,
+                            right: rect.right,
+                            bottom: rect.bottom,
+                        });
+                    }
 
-            x, y, w, h = bb["x"], bb["y"], bb["width"], bb["height"]
-            if min_x is None:
-                min_x, min_y = x, y
-                max_x, max_y = x + w, y + h
-            else:
-                min_x = min(min_x, x)
-                min_y = min(min_y, y)
-                max_x = max(max_x, x + w)
-                max_y = max(max_y, y + h)
+                    if (!rects.length) {
+                        return null;
+                    }
 
-        # Bazı anlarda satırlar DOM'da yeniden çizilir; kısa bekleyip tekrar dene
-        if min_x is None:
-            if attempt < max_retry:
-                page.wait_for_timeout(300)
-                continue
-            return False
+                    const minLeft = Math.min(...rects.map(r => r.left));
+                    const minTop = Math.min(...rects.map(r => r.top));
+                    const maxRight = Math.max(...rects.map(r => r.right));
+                    const maxBottom = Math.max(...rects.map(r => r.bottom));
 
-        clip = {
-            "x": max(0, min_x - pad_x),
-            "y": max(0, min_y - pad_y),
-            "width": max(2, (max_x - min_x) + pad_x * 2),
-            "height": max(2, (max_y - min_y) + pad_y * 2),
-        }
+                    const x = Math.max(0, minLeft - padX);
+                    const y = Math.max(0, minTop - padY);
+                    const right = Math.min(window.innerWidth, maxRight + padX);
+                    const bottom = Math.min(window.innerHeight, maxBottom + padY);
+                    const fullyVisible =
+                        minLeft >= 0 &&
+                        minTop >= 0 &&
+                        maxRight <= window.innerWidth &&
+                        maxBottom <= window.innerHeight;
 
-        try:
-            page.screenshot(path=out_path, clip=clip)
+                    return {
+                        clip: {
+                            x,
+                            y,
+                            width: Math.max(2, right - x),
+                            height: Math.max(2, bottom - y),
+                        },
+                        fullyVisible,
+                        firstText: targets[0] ? targets[0].innerText : "",
+                    };
+                }
+                """,
+                {
+                    "start": start_i,
+                    "end": end_i,
+                    "padX": pad_x,
+                    "padY": pad_y,
+                },
+            )
+
+            if not measured:
+                raise RuntimeError("Screenshot rows could not be measured.")
+            if not measured.get("fullyVisible", False):
+                raise RuntimeError("Screenshot row group does not fit in the viewport.")
+
+            # If the live table changed just before capture, do not send a
+            # screenshot belonging to a different opportunity.
+            if expected_profit is not None:
+                current_profit = parse_percent(measured.get("firstText", ""))
+                if current_profit is None or abs(current_profit - expected_profit) > 0.001:
+                    return False
+
+            page.screenshot(path=out_path, clip=measured["clip"])
             return True
-        except Exception:
+        except Exception as e:
+            bot_log(f"[SS] Attempt {attempt}/{max_retry} failed: {e}")
             if attempt < max_retry:
-                page.wait_for_timeout(300)
-                continue
-            return False
+                page.wait_for_timeout(retry_wait_ms)
 
     return False
 
-
 def main():
     if not os.path.exists(STATE_PATH):
-        print(f"❌ {STATE_PATH} bulunamadı. Önce python save_session.py ile login session kaydet.")
+        bot_log(f"❌ {STATE_PATH} bulunamadı. Önce python save_session.py ile login session kaydet.")
         return
 
     seen = set()  # her açılışta sıfırdan başla
 
     restart_requested = False
+    threshold = load_runtime_threshold(VB_THRESHOLD)
+    bot_log(f"[AYAR] Firsat limiti: %{format_threshold(threshold)}")
 
     with sync_playwright() as p:
         # Railway gibi sunucularda headless şart
@@ -559,16 +689,32 @@ def main():
                         if command == "restart":
                             restart_requested = True
                             try:
-                                send_telegram("♻️ Fırsat bot yeniden başlatılıyor")
+                                send_telegram("\u267b\ufe0f F\u0131rsat bot yeniden ba\u015flat\u0131l\u0131yor")
                             except Exception:
                                 pass
                             break
-                        if command == "dur" and not paused:
+                        if command == "logs":
+                            send_telegram("\U0001f4cb Son 10 log:\n" + get_recent_logs(10))
+                        elif command.startswith("threshold:"):
+                            threshold = float(command.split(":", 1)[1])
+                            saved = save_runtime_threshold(threshold)
+                            bot_log(
+                                f"[AYAR] Firsat limiti Telegram'dan "
+                                f"%{format_threshold(threshold)} yapildi"
+                            )
+                            reply = (
+                                f"\u2705 F\u0131rsat limiti "
+                                f"%{format_threshold(threshold)} olarak ayarland\u0131"
+                            )
+                            if not saved:
+                                reply += "\n\u26a0\ufe0f Restart sonras\u0131 korunamayabilir."
+                            send_telegram(reply)
+                        elif command == "dur" and not paused:
                             paused = True
-                            send_telegram("⏸ Bot duraklatıldı")
+                            send_telegram("\u23f8 Bot duraklat\u0131ld\u0131")
                         elif command == "devam" and paused:
                             paused = False
-                            send_telegram("▶️ Bot devam ediyor")
+                            send_telegram("\u25b6\ufe0f Bot devam ediyor")
 
                 if restart_requested:
                     break
@@ -585,11 +731,11 @@ def main():
                 items = scrape_rows(page)
 
                 max_p = max([x["profit"] for x in items], default=0)
-                print(f"Gorulen satir: {len(items)} | Max kar: {max_p} | Filtre: {FILTER_NAME}")
+                bot_log(f"Gorulen satir: {len(items)} | Max kar: {max_p} | Filtre: {FILTER_NAME}")
 
-                thr = VB_THRESHOLD
+                thr = threshold
                 hits = [x for x in items if x["profit"] >= thr]
-                print(f"Eşik üstü: {len(hits)} (Filtre: {FILTER_NAME} | thr={thr})")
+                bot_log(f"Eşik üstü: {len(hits)} (Filtre: {FILTER_NAME} | thr={thr})")
 
                 hits.sort(key=lambda x: x["profit"], reverse=True)
 
@@ -602,7 +748,13 @@ def main():
                     # İstenen değişiklik: metin yerine, o fırsatın bulunduğu satırların ekran görüntüsünü gönder
                     ts = int(time.time())
                     shot_path = os.path.join("/tmp", f"shot_{h['profit']:.2f}_{ts}.png")
-                    ok = screenshot_rows_group(page, h["start_i"], h["end_i"], shot_path)
+                    ok = screenshot_rows_group(
+                        page,
+                        h["start_i"],
+                        h["end_i"],
+                        shot_path,
+                        expected_profit=h["profit"],
+                    )
 
                     # ✅ Burada artık her fırsat kendi calc_url'sini kullanıyor
                     calc = h.get("calc_url") or CALC_LINK
@@ -621,16 +773,16 @@ def main():
                 save_seen(seen)
 
             except PWTimeout:
-                print("Timeout oldu, tekrar denenecek...")
+                bot_log("Timeout oldu, tekrar denenecek...")
             except Exception as e:
-                print("ERR:", e)
+                bot_log("ERR:", e)
 
             time.sleep(INTERVAL_SEC)
 
         browser.close()
 
     if restart_requested:
-        print("[RESTART] Bot yeniden başlatılıyor...")
+        bot_log("[RESTART] Bot yeniden başlatılıyor...")
         return True
 
     return False
