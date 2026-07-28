@@ -189,6 +189,12 @@ def poll_telegram_commands(offset: int) -> tuple[int, list[str]]:
         if not text:
             continue
 
+        normalized_text = re.sub(r"\s+", " ", text.casefold()).strip()
+        normalized_text = normalized_text.lstrip("/")
+        if normalized_text in {"ekran resmi", "ekranresmi", "screenshot"}:
+            commands.append("screenshot")
+            continue
+
         command = text.split()[0].lower().split("@", 1)[0].lstrip("/")
         if command in {"dur", "devam", "restart", "logs"}:
             commands.append(command)
@@ -368,14 +374,78 @@ def pretty_text(t: str) -> str:
 
 
 def is_logged_in(page) -> bool:
+    """Detect a real signed-in session instead of merely seeing surebet HTML."""
     url = (page.url or "").lower()
-    if "login" in url or "signin" in url:
+    if any(part in url for part in ("/users/sign_in", "login", "signin")):
         return False
     try:
-        content = page.content()
-        return ("Kâr" in content) or ("surebet" in content.lower())
+        login_links = page.locator(
+            'a[href*="/users/sign_in"], a[href*="/login"], a[href*="/signin"]'
+        )
+        for index in range(min(login_links.count(), 10)):
+            if login_links.nth(index).is_visible():
+                return False
+        return True
     except Exception:
         return True
+
+
+def get_reported_result_count(page) -> int | None:
+    """Read the site's own '<number> kesin bahis bulundu' counter."""
+    try:
+        body = page.locator("body").inner_text(timeout=5000)
+        match = re.search(r"([\d.\s]+)\s+kesin bahis bulundu", body, re.I)
+        if not match:
+            return None
+        digits = re.sub(r"\D", "", match.group(1))
+        return int(digits) if digits else None
+    except Exception:
+        return None
+
+
+def get_page_diagnostics(page) -> dict:
+    try:
+        title = page.title()
+    except Exception:
+        title = "?"
+    return {
+        "url": page.url or "?",
+        "title": title,
+        "logged_in": is_logged_in(page),
+        "filter": get_site_filter(page) or "?",
+        "reported": get_reported_result_count(page),
+        "records": page.locator("table tbody").count(),
+        "surebet_records": page.locator("table tbody.surebet_record").count(),
+    }
+
+
+def send_page_screenshot(page, reason: str = "Manuel ekran goruntusu") -> None:
+    """Send the viewport exactly as the headless bot currently sees it."""
+    shot_path = os.path.join("/tmp", f"page_debug_{int(time.time())}.png")
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(120)
+        details = get_page_diagnostics(page)
+        page.screenshot(
+            path=shot_path,
+            full_page=False,
+            animations="disabled",
+            timeout=10000,
+        )
+        caption = (
+            f"\U0001f4f8 {reason}\n"
+            f"Filtre: {details['filter']} | "
+            f"Sayac: {details['reported']} | "
+            f"Blok: {details['surebet_records']}"
+        )
+        send_telegram_photo(shot_path, caption=caption)
+        bot_log(f"[EKRAN] Gonderildi | {details}")
+    finally:
+        try:
+            if os.path.exists(shot_path):
+                os.remove(shot_path)
+        except Exception:
+            pass
 
 
 def ensure_scanning_on(page):
@@ -425,7 +495,7 @@ def get_site_filter(page) -> str | None:
     try:
         filter_label = page.locator("text=Filtre").first
         sel = filter_label.locator("xpath=following::select[1]")
-        return sel.locator("option:checked").inner_text().strip()
+        return sel.locator("option:checked").inner_text(timeout=2000).strip()
     except Exception:
         return None
 
@@ -496,8 +566,9 @@ def get_record_id(record) -> str | None:
 def scrape_rows(page):
     page.wait_for_timeout(1500)
 
-    # Every opportunity is one independent tbody.surebet_record element.
-    records = page.locator("table tbody.surebet_record")
+    # Every opportunity is one independent tbody. Do not depend on the
+    # optional surebet_record class; the site can omit it after an AJAX update.
+    records = page.locator("table tbody")
     results = []
 
     for i in range(min(records.count(), 500)):
@@ -540,7 +611,7 @@ def screenshot_surebet_record(
             # Re-find by stable id on every attempt. Live table reordering no
             # longer changes which opportunity is captured.
             record = page.locator(
-                "table tbody.surebet_record",
+                "table tbody",
                 has=page.locator(f'a[href*="/{record_id}/"]'),
             ).first
             if record.count() == 0:
@@ -616,6 +687,10 @@ def main():
         page.goto(URL, wait_until="domcontentloaded", timeout=60000)
 
         if not is_logged_in(page):
+            try:
+                send_page_screenshot(page, "Oturum gecersiz")
+            except Exception as e:
+                bot_log("[OTURUM] Ekran goruntusu gonderilemedi:", e)
             send_telegram("❌ Oturum geçersiz görünüyor. save_session.py ile yeniden giriş yapıp session kaydetmen lazım.")
             browser.close()
             return
@@ -628,6 +703,9 @@ def main():
 
         command_offset = initialize_telegram_offset()
         paused = False
+        bad_empty_scans = 0
+        last_empty_recovery = 0.0
+        last_empty_alert = 0.0
 
         while True:
             try:
@@ -645,6 +723,14 @@ def main():
                             break
                         if command == "logs":
                             send_telegram("\U0001f4cb Son 10 log:\n" + get_recent_logs(10))
+                        elif command == "screenshot":
+                            try:
+                                send_page_screenshot(page, "Botun gordugu ekran")
+                            except Exception as e:
+                                bot_log("[EKRAN] Gonderilemedi:", e)
+                                send_telegram(
+                                    "\u274c Ekran goruntusu alinamadi: " + str(e)[:180]
+                                )
                         elif command.startswith("threshold:"):
                             threshold = float(command.split(":", 1)[1])
                             saved = save_runtime_threshold(threshold)
@@ -675,10 +761,50 @@ def main():
 
                 ensure_scanning_on(page)
                 if not is_logged_in(page):
+                    try:
+                        send_page_screenshot(page, "Oturum kapandi")
+                    except Exception as e:
+                        bot_log("[OTURUM] Ekran goruntusu gonderilemedi:", e)
                     send_telegram("⚠️ Oturum düşmüş görünüyor. save_session.py ile session'ı yenile.")
                     break
 
                 items = scrape_rows(page)
+                reported_count = get_reported_result_count(page)
+                bad_empty = not items and (
+                    reported_count is None or reported_count > 0
+                )
+
+                if bad_empty:
+                    bad_empty_scans += 1
+                else:
+                    bad_empty_scans = 0
+
+                if bad_empty_scans >= 3:
+                    now = time.monotonic()
+                    details = get_page_diagnostics(page)
+                    bot_log(f"[SAYFA] Firsatlar okunamiyor | {details}")
+
+                    # Send at most one automatic diagnostic image per 10 min.
+                    if now - last_empty_alert >= 600:
+                        try:
+                            send_page_screenshot(
+                                page,
+                                "Sayfa dolu gorunuyor fakat firsatlar okunamadi",
+                            )
+                        except Exception as e:
+                            bot_log("[SAYFA] Teshis ekrani gonderilemedi:", e)
+                        last_empty_alert = now
+
+                    # Refresh at most once per minute, then restore the filter.
+                    if now - last_empty_recovery >= 60:
+                        bot_log("[SAYFA] Yenileniyor ve filtre tekrar seciliyor...")
+                        page.reload(wait_until="domcontentloaded", timeout=60000)
+                        set_site_filter(page, FILTER_NAME)
+                        ensure_scanning_on(page)
+                        last_empty_recovery = now
+                    bad_empty_scans = 0
+                    time.sleep(INTERVAL_SEC)
+                    continue
 
                 max_p = max([x["profit"] for x in items], default=0)
                 bot_log(f"Gorulen satir: {len(items)} | Max kar: {max_p} | Filtre: {FILTER_NAME}")
