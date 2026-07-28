@@ -31,6 +31,9 @@ VB_THRESHOLD = float(os.environ.get("VB_THRESHOLD", "10"))
 
 BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 CHAT_ID = os.environ.get("TG_CHAT_ID")
+SITE_EMAIL = os.environ.get("SITE_EMAIL")
+SITE_PASSWORD = os.environ.get("SITE_PASSWORD")
+LOGIN_RETRY_SEC = max(10, int(os.environ.get("LOGIN_RETRY_SEC", "30")))
 
 STATE_PATH = os.environ.get("STATE_PATH", "storage_state.json")
 SEEN_FILE = os.environ.get("SEEN_FILE", "seen.json")
@@ -448,6 +451,96 @@ def send_page_screenshot(page, reason: str = "Manuel ekran goruntusu") -> None:
             pass
 
 
+
+def get_login_error(page) -> str | None:
+    """Return a short visible sign-in error without exposing credentials."""
+    try:
+        messages = page.locator(
+            ".alert-danger, .alert-error, .flash-error, [role='alert']"
+        )
+        for index in range(min(messages.count(), 10)):
+            message = messages.nth(index)
+            if message.is_visible():
+                text = message.inner_text(timeout=2000).strip()
+                if text:
+                    return re.sub(r"\s+", " ", text)[:240]
+    except Exception:
+        pass
+    return None
+
+
+def auto_login(page, context) -> bool:
+    """Sign in from Hetzner using credentials supplied through environment."""
+    if not SITE_EMAIL or not SITE_PASSWORD:
+        bot_log("[OTURUM] SITE_EMAIL veya SITE_PASSWORD ayarli degil.")
+        return False
+
+    try:
+        email = page.locator("#user_email")
+        password = page.locator("#user_password")
+        submit = page.locator(
+            'form[action="/users/sign_in"] button[type="submit"]'
+        )
+
+        # Navigate only when the login form is not already on screen.
+        if email.count() != 1 or password.count() != 1 or submit.count() != 1:
+            page.goto(
+                BASE_URL + "/users/sign_in",
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
+            email = page.locator("#user_email")
+            password = page.locator("#user_password")
+            submit = page.locator(
+                'form[action="/users/sign_in"] button[type="submit"]'
+            )
+
+        if email.count() != 1 or password.count() != 1 or submit.count() != 1:
+            raise RuntimeError("Login formu bulunamadi.")
+
+        email.fill(SITE_EMAIL, timeout=5000)
+        password.fill(SITE_PASSWORD, timeout=5000)
+        submit.click(timeout=10000)
+        page.wait_for_timeout(2500)
+
+        if not is_logged_in(page):
+            error = get_login_error(page)
+            bot_log("[OTURUM] Otomatik giris basarisiz:", error or page.url)
+            return False
+
+        # A successful login can leave the browser on an intermediate page.
+        if "/users/sign_in" in (page.url or ""):
+            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+
+        if not is_logged_in(page):
+            return False
+
+        try:
+            context.storage_state(path=STATE_PATH)
+        except Exception as e:
+            bot_log("[OTURUM] Yeni session dosyasi kaydedilemedi:", e)
+
+        bot_log("[OTURUM] Otomatik giris basarili.")
+        return True
+    except Exception as e:
+        bot_log("[OTURUM] Otomatik giris hatasi:", e)
+        return False
+
+
+def send_login_failure_once(page, reason: str) -> None:
+    try:
+        send_page_screenshot(page, reason)
+    except Exception as e:
+        bot_log("[OTURUM] Ekran goruntusu gonderilemedi:", e)
+    try:
+        send_telegram(
+            "\u26a0\ufe0f Otomatik giris yapilamadi. "
+            f"Bot {LOGIN_RETRY_SEC} saniyede bir yeniden deneyecek."
+        )
+    except Exception as e:
+        bot_log("[OTURUM] Telegram uyarisi gonderilemedi:", e)
+
+
 def ensure_scanning_on(page):
     def has_pause_hint() -> bool:
         try:
@@ -668,10 +761,6 @@ def screenshot_surebet_record(
     return False
 
 def main():
-    if not os.path.exists(STATE_PATH):
-        bot_log(f"❌ {STATE_PATH} bulunamadı. Önce python save_session.py ile login session kaydet.")
-        return
-
     seen = set()  # her açılışta sıfırdan başla
 
     restart_requested = False
@@ -681,21 +770,32 @@ def main():
     with sync_playwright() as p:
         # Railway gibi sunucularda headless şart
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=STATE_PATH)
+        context_options = {}
+        if os.path.exists(STATE_PATH):
+            context_options["storage_state"] = STATE_PATH
+        context = browser.new_context(**context_options)
         page = context.new_page()
 
         page.goto(URL, wait_until="domcontentloaded", timeout=60000)
 
-        if not is_logged_in(page):
-            try:
-                send_page_screenshot(page, "Oturum gecersiz")
-            except Exception as e:
-                bot_log("[OTURUM] Ekran goruntusu gonderilemedi:", e)
-            send_telegram("❌ Oturum geçersiz görünüyor. save_session.py ile yeniden giriş yapıp session kaydetmen lazım.")
-            browser.close()
-            return
+        startup_alert_sent = False
+        startup_used_auto_login = False
+        while not is_logged_in(page):
+            if auto_login(page, context):
+                startup_used_auto_login = True
+                startup_alert_sent = False
+                break
+            if not startup_alert_sent:
+                send_login_failure_once(page, "Otomatik giris basarisiz")
+                startup_alert_sent = True
+            bot_log(
+                f"[OTURUM] {LOGIN_RETRY_SEC} saniye sonra yeniden denenecek."
+            )
+            time.sleep(LOGIN_RETRY_SEC)
 
         send_telegram("✅ Fırsat bot başlatıldı")
+        if startup_used_auto_login:
+            send_telegram("🔐 Oturum otomatik olarak açıldı")
 
         # Sadece tek filtre kullanıyoruz
         set_site_filter(page, FILTER_NAME)
@@ -706,6 +806,7 @@ def main():
         bad_empty_scans = 0
         last_empty_recovery = 0.0
         last_empty_alert = 0.0
+        login_alert_sent = False
 
         while True:
             try:
@@ -761,13 +862,23 @@ def main():
 
                 ensure_scanning_on(page)
                 if not is_logged_in(page):
-                    try:
-                        send_page_screenshot(page, "Oturum kapandi")
-                    except Exception as e:
-                        bot_log("[OTURUM] Ekran goruntusu gonderilemedi:", e)
-                    send_telegram("⚠️ Oturum düşmüş görünüyor. save_session.py ile session'ı yenile.")
-                    break
+                    if auto_login(page, context):
+                        login_alert_sent = False
+                        send_telegram("🔐 Oturum otomatik olarak yenilendi")
+                        set_site_filter(page, FILTER_NAME)
+                        ensure_scanning_on(page)
+                        continue
 
+                    if not login_alert_sent:
+                        send_login_failure_once(page, "Oturum kapandi")
+                        login_alert_sent = True
+                    bot_log(
+                        f"[OTURUM] {LOGIN_RETRY_SEC} saniye sonra yeniden denenecek."
+                    )
+                    time.sleep(LOGIN_RETRY_SEC)
+                    continue
+
+                login_alert_sent = False
                 items = scrape_rows(page)
                 reported_count = get_reported_result_count(page)
                 bad_empty = not items and (

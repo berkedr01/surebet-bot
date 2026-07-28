@@ -3,3 +3,4 @@ __pycache__/
 debug.log
 shot_*.png
 bot_settings.json
+storage_state.json
