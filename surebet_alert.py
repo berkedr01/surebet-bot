@@ -220,7 +220,7 @@ def parse_percent(txt: str):
     if not txt:
         return None
     t = txt.strip()
-    m = re.search(r"(\d+(?:[.,]\d+)?)\s*%|%\s*(\d+(?:[.,]\d+)?)", t)
+    m = re.search(r"(-?\d+(?:[.,]\d+)?)\s*%|%\s*(-?\d+(?:[.,]\d+)?)", t)
     if not m:
         return None
     s = (m.group(1) or m.group(2)).replace(",", ".")
@@ -286,12 +286,18 @@ def normalize_event_identity(text: str) -> str:
     return t
 
 
-def make_key(filter_name: str, profit: float, text: str) -> str:
+def make_key(
+    filter_name: str,
+    profit: float,
+    text: str,
+    record_id: str | None = None,
+) -> str:
     """
     Aynı event + aynı kâr (2 ondalık) => aynı key (tekrar mesaj yok)
     Event aynı ama kâr değişirse => yeni key (tekrar mesaj var)
     """
-    identity = normalize_event_identity(text)
+    # The site embeds a stable opportunity id in every prong link.
+    identity = record_id or normalize_event_identity(text)
     profit_tag = f"{profit:.2f}"
     raw = f"{filter_name}|{identity}|{profit_tag}"
     return hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()
@@ -462,185 +468,129 @@ def get_calc_url_from_row(page, row):
     except Exception:
         return None
 
+
+def get_record_id(record) -> str | None:
+    """Return the stable surebet id embedded in calculator/prong links."""
+    selectors = (
+        "form[action*='/calculator/show/']",
+        "a[href*='/calculator/show/']",
+        "a[href*='/nav/surebet/prong/']",
+    )
+    for selector in selectors:
+        try:
+            node = record.locator(selector).first
+            if node.count() == 0:
+                continue
+            attr = "action" if selector.startswith("form") else "href"
+            value = (node.get_attribute(attr) or "").strip()
+            match = re.search(r"/calculator/show/([^/?#]+)", value)
+            if not match:
+                match = re.search(r"/nav/surebet/prong/\d+/([^/?#]+)", value)
+            if match:
+                return match.group(1)
+        except Exception:
+            continue
+    return None
+
+
 def scrape_rows(page):
     page.wait_for_timeout(1500)
 
-    rows = page.locator("table tbody tr")
-    n = rows.count()
-
+    # Every opportunity is one independent tbody.surebet_record element.
+    records = page.locator("table tbody.surebet_record")
     results = []
 
-    i = 0
-    while i < min(n, 1500):
-        row = rows.nth(i)
-        txt = row.inner_text().strip()
-
-        if not txt:
-            i += 1
+    for i in range(min(records.count(), 500)):
+        record = records.nth(i)
+        first_row = record.locator("tr").first
+        first_text = first_row.inner_text().strip()
+        profit = parse_percent(first_text)
+        if profit is None:
             continue
 
-        p = parse_percent(txt)
-        if p is None:
-            i += 1
-            continue
+        full_text = record.inner_text().strip()
+        full_text = re.sub(r"\s+\n", "\n", full_text)
+        full_text = re.sub(r"\n{3,}", "\n\n", full_text)
 
-        # ✅ Bu fırsatın hesap makinesi linkini ilk satırdan yakala
-        calc_url = get_calc_url_from_row(page, row)
-
-        group_lines = [txt]
-
-        j = i + 1
-        while j < min(n, 1500):
-            nxt = rows.nth(j).inner_text().strip()
-            if not nxt:
-                j += 1
-                continue
-
-            if parse_percent(nxt) is not None:
-                break
-
-            group_lines.append(nxt)
-            j += 1
-
-        full_txt = "\n".join(group_lines)
-        full_txt = re.sub(r"\s+\n", "\n", full_txt)
-        full_txt = re.sub(r"\n{3,}", "\n\n", full_txt)
-
-        # Bu fırsatın UI'daki hangi satırlardan oluştuğunu da saklıyoruz
         results.append(
             {
-                "profit": p,
-                "text": full_txt,
-                "start_i": i,
-                "end_i": j,
-                "calc_url": calc_url or CALC_LINK,  # fallback: eski sabit link
+                "profit": profit,
+                "text": full_text,
+                "record_id": get_record_id(record),
+                "calc_url": get_calc_url_from_row(page, first_row) or CALC_LINK,
             }
         )
-        i = j
 
     return results
 
 
-def screenshot_rows_group(
+def screenshot_surebet_record(
     page,
-    start_i: int,
-    end_i: int,
+    record_id: str,
     out_path: str,
     expected_profit: float | None = None,
 ) -> bool:
-    """Capture one row group without scrolling again while measuring it."""
-    rows = page.locator("table tbody tr")
-
-    pad_x = int(os.getenv("SS_PAD_X", "6"))
-    pad_y = int(os.getenv("SS_PAD_Y", "6"))
-    max_retry = int(os.getenv("SS_RETRY", "2"))
-    settle_ms = int(os.getenv("SS_SETTLE_MS", "60"))
-    retry_wait_ms = int(os.getenv("SS_RETRY_WAIT_MS", "100"))
+    """Capture exactly one live tbody.surebet_record element."""
+    max_retry = int(os.getenv("SS_RETRY", "3"))
+    settle_ms = int(os.getenv("SS_SETTLE_MS", "80"))
+    retry_wait_ms = int(os.getenv("SS_RETRY_WAIT_MS", "120"))
 
     for attempt in range(1, max_retry + 1):
         try:
-            row_count = rows.count()
-            if start_i < 0 or start_i >= row_count or end_i <= start_i:
-                return False
+            # Re-find by stable id on every attempt. Live table reordering no
+            # longer changes which opportunity is captured.
+            record = page.locator(
+                "table tbody.surebet_record",
+                has=page.locator(f'a[href*="/{record_id}/"]'),
+            ).first
+            if record.count() == 0:
+                raise RuntimeError("Opportunity is no longer present.")
 
-            # Scroll only once. Scrolling for every row mixed bounding boxes
-            # measured at different viewport positions.
-            rows.nth(start_i).evaluate(
-                "el => el.scrollIntoView({block: 'start', inline: 'nearest'})",
-                timeout=3000,
-            )
+            record.scroll_into_view_if_needed(timeout=3000)
             if settle_ms > 0:
                 page.wait_for_timeout(settle_ms)
 
-            # Measure every target row atomically at the same scroll position,
-            # then convert viewport coordinates to document coordinates.
-            measured = page.evaluate(
-                """
-                ({ start, end, padX, padY }) => {
-                    const allRows = Array.from(
-                        document.querySelectorAll("table tbody tr")
-                    );
-                    if (start < 0 || start >= allRows.length || end <= start) {
-                        return null;
-                    }
+            first_text = record.locator("tr").first.inner_text(timeout=3000)
+            if get_record_id(record) != record_id:
+                raise RuntimeError("Opportunity changed during capture.")
 
-                    const targets = allRows.slice(start, Math.min(end, allRows.length));
-                    const rects = [];
+            if expected_profit is not None:
+                current_profit = parse_percent(first_text)
+                if (
+                    current_profit is None
+                    or abs(current_profit - expected_profit) > 0.001
+                ):
+                    raise RuntimeError("Profit changed during capture.")
 
-                    for (const row of targets) {
-                        const style = window.getComputedStyle(row);
-                        const rect = row.getBoundingClientRect();
-                        if (
-                            style.display === "none" ||
-                            style.visibility === "hidden" ||
-                            rect.width <= 0 ||
-                            rect.height <= 0
-                        ) {
-                            continue;
-                        }
-                        rects.push({
-                            left: rect.left,
-                            top: rect.top,
-                            right: rect.right,
-                            bottom: rect.bottom,
-                        });
-                    }
-
-                    if (!rects.length) {
-                        return null;
-                    }
-
-                    const minLeft = Math.min(...rects.map(r => r.left));
-                    const minTop = Math.min(...rects.map(r => r.top));
-                    const maxRight = Math.max(...rects.map(r => r.right));
-                    const maxBottom = Math.max(...rects.map(r => r.bottom));
-
-                    const x = Math.max(0, minLeft - padX);
-                    const y = Math.max(0, minTop - padY);
-                    const right = Math.min(window.innerWidth, maxRight + padX);
-                    const bottom = Math.min(window.innerHeight, maxBottom + padY);
-                    const fullyVisible =
-                        minLeft >= 0 &&
-                        minTop >= 0 &&
-                        maxRight <= window.innerWidth &&
-                        maxBottom <= window.innerHeight;
-
-                    return {
-                        clip: {
-                            x,
-                            y,
-                            width: Math.max(2, right - x),
-                            height: Math.max(2, bottom - y),
-                        },
-                        fullyVisible,
-                        firstText: targets[0] ? targets[0].innerText : "",
-                    };
-                }
-                """,
-                {
-                    "start": start_i,
-                    "end": end_i,
-                    "padX": pad_x,
-                    "padY": pad_y,
-                },
+            # Element screenshot uses the exact tbody boundary: no next header,
+            # no manual padding and no mixed viewport/document coordinates.
+            record.screenshot(
+                path=out_path,
+                animations="disabled",
+                timeout=5000,
             )
 
-            if not measured:
-                raise RuntimeError("Screenshot rows could not be measured.")
-            if not measured.get("fullyVisible", False):
-                raise RuntimeError("Screenshot row group does not fit in the viewport.")
-
-            # If the live table changed just before capture, do not send a
-            # screenshot belonging to a different opportunity.
-            if expected_profit is not None:
-                current_profit = parse_percent(measured.get("firstText", ""))
-                if current_profit is None or abs(current_profit - expected_profit) > 0.001:
-                    return False
-
-            page.screenshot(path=out_path, clip=measured["clip"])
+            # Validate again after capture. If an AJAX refresh happened in the
+            # tiny interval between validation and screenshot, discard it.
+            final_first_text = record.locator("tr").first.inner_text(timeout=3000)
+            final_profit = parse_percent(final_first_text)
+            if (
+                get_record_id(record) != record_id
+                or final_profit is None
+                or (
+                    expected_profit is not None
+                    and abs(final_profit - expected_profit) > 0.001
+                )
+            ):
+                raise RuntimeError("Opportunity changed while screenshotting.")
             return True
-        except Exception as e:
-            bot_log(f"[SS] Attempt {attempt}/{max_retry} failed: {e}")
+        except Exception as exc:
+            try:
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+            except Exception:
+                pass
+            bot_log(f"[SS] Attempt {attempt}/{max_retry} failed: {exc}")
             if attempt < max_retry:
                 page.wait_for_timeout(retry_wait_ms)
 
@@ -740,18 +690,26 @@ def main():
                 hits.sort(key=lambda x: x["profit"], reverse=True)
 
                 for h in hits:
-                    key = make_key(FILTER_NAME, h["profit"], h["text"])
+                    record_id = h.get("record_id")
+                    if not record_id:
+                        bot_log("[SS] Firsat kimligi bulunamadi; sonraki turda tekrar denenecek.")
+                        continue
+
+                    key = make_key(
+                        FILTER_NAME,
+                        h["profit"],
+                        h["text"],
+                        record_id=record_id,
+                    )
                     if key in seen:
                         continue
-                    seen.add(key)
 
                     # İstenen değişiklik: metin yerine, o fırsatın bulunduğu satırların ekran görüntüsünü gönder
                     ts = int(time.time())
                     shot_path = os.path.join("/tmp", f"shot_{h['profit']:.2f}_{ts}.png")
-                    ok = screenshot_rows_group(
+                    ok = screenshot_surebet_record(
                         page,
-                        h["start_i"],
-                        h["end_i"],
+                        record_id,
                         shot_path,
                         expected_profit=h["profit"],
                     )
@@ -761,14 +719,22 @@ def main():
                     caption = f"🚨 Kar: %{h['profit']:.2f}"
 
                     if ok:
-                        send_telegram_photo(shot_path, caption=caption)
                         try:
-                            os.remove(shot_path)
-                        except Exception:
-                            pass
+                            send_telegram_photo(shot_path, caption=caption)
+                            # Mark seen only after Telegram confirms the photo.
+                            seen.add(key)
+                        finally:
+                            try:
+                                os.remove(shot_path)
+                            except Exception:
+                                pass
                     else:
-                        # Screenshot alamazsak en azından metinle düşmesin
-                        send_telegram(caption)
+                        # Never send a caption-only alert. A live opportunity
+                        # remains unseen and will be retried on the next scan.
+                        bot_log(
+                            f"[SS] %{h['profit']:.2f} ekran goruntusu alinamadi; "
+                            "sonraki turda tekrar denenecek."
+                        )
 
                 save_seen(seen)
 
