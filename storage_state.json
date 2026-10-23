@@ -1,0 +1,155 @@
+{
+  "cookies": [
+    {
+      "name": "uu",
+      "value": "81d975d0-2dce-43c9-a5d8-711f3ea9142b",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1827321420.644384,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ab",
+      "value": "751",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297398.371471,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "autoupdate_view_id",
+      "value": "7389129e-c519-487b-b948-c4356e4dd40b",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297400.371483,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "time_zone",
+      "value": "Europe/Istanbul",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297400.90343,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "time_zone_offset",
+      "value": "-180",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297400.903545,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga",
+      "value": "GA1.2.1746372815.1792761401",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1827321417.725898,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "devise.authentication_method",
+      "value": "email",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297416.926416,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "remember_user_token",
+      "value": "eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaGJDRnNHYVFNb2x3VkpJaGwyY3pRME5WVkZkRUpvY1VZNU9HNU9hbGxMZWdZNkJrVkdTU0lYTVRjNU1qYzJNVFF4Tmk0M09UUTFPRE00QmpzQVJnPT0iLCJleHAiOiIyMDI5LTEwLTIzVDEzOjE2OjU2Ljc5NFoiLCJwdXIiOm51bGx9fQ%3D%3D--f97ba1ba6c0bc22c2cff57d4605fd4340d24f22f",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1827321416.926431,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sstoken",
+      "value": "29879356-a5d56708b0a43362ea7e06379f378bc2845cdb0e-29879357-b28c11569f7f32be6dd0aa4499ee8fc6b803f984",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1792847817,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "autoupdate.surebets.prematch",
+      "value": "on",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297419,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "stoken",
+      "value": "29879357-b728ec6df64f6d33648dbe3ca37de977e9bf4969",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1824297420.644431,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "ref",
+      "value": "YWZtTklyOGF4RXYwT09yWUFDaHN6MXl6ei9aK1FXaW5HYjljMUVLd25yejhETEcrWHpsVTRib24ya0pLOVBiS0JiMDlVUUFUR2tuQ0U1VlNjL2NEZ1JxSHppTS85RWV1OFpxOVFlQjRJT0gwZVh2VHF2ZVZxUGtVbGpHSEhjaVctLTQxeFNZRVBMOSt0OC9GMzYvQU5La2c9PQ%3D%3D--01044e2a3a387088da67b0fe85e1f2b7b16b94da",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1795439820.404414,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_sp5",
+      "value": "Vm56OUdhWGZMR0FTSkhVdFhVaWluSEhGc2h4MXNSMEhaaDJNRFBiWVB3cDZFWGlMTXJzdmwyaWw0RlBLMlBuMy82RkVnWTRUbTN2MlFFYlNGYzdMRE55M0RkNDY0TXFKelIwa1lPdjdTZzlIeStCaGJoU1I1aVVmd2pzY1ZNbldsbEM4MlA5cHA2WS9kS1kxcjZoeUJHME10YkRTVzE2cjhIUU1lTldROFNQbTU4aVlpVGxQVWpwdXFJWW5RVjdHODlLVk9kT3VZSitsOWlQYXJnOUpTQlcxeXY2SnBncWNMQnpQNlhwdnI2ZlltUXJIK3JtaUFHTi9iTHpoM002WU9sQno2eko4WnBWZlBNYURwTmxNUGVsN3JaYTVQUXlHU2VqVGRWQ3NQMC84REY4RHJZUCswa2tkSWFOeWNUaEdKRkZEbkpobDUwZnRoNThqdmpvMGpnKzhvQjh6OUxxRmM2VUlWaFhGRDdITlkzK3JDS0lOUkNqVTF0T1NONlFqTFlOYU1wcS9JZTB6U3RRUHRlcUJXUGpFZlVKSUhTeFEyNnlVZWVFZGtraW9sNDNhVW9JZEEyMnRkZVZFc1Z0YWdNemJxR0MremZrU2VvV0ZPVXBHWnFoakg0OVEweXVKZXdNTExuOU53bXVCZUhrcVYydTk2bTNTN0s2UzZzMjBmOHlVYlZ5K0kxQ3JKbm9kcWMxWTFGV0ZxSmo5TWZ6Y2haUlNwYm4rSkJMay9FOWVERndSZHUzUHp4RjE5WGhPLS1PMHlSTkx2MnB5T1NtdTlHWHhySnpnPT0%3D--732337485ee22b3df72bc58909d8ecca04fad366",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga_4H2DFG8NDS",
+      "value": "GS2.2.s1792761401$o1$g1$t1792761422$j39$l0$h0",
+      "domain": ".apostasseguras.com",
+      "path": "/",
+      "expires": 1827321422.265481,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://tr.apostasseguras.com",
+      "localStorage": [
+        {
+          "name": "autoupdate.surebets.prematch.working_tab",
+          "value": "5d3dfd3c-23fa-41bf-b729-26d31053c675"
+        }
+      ]
+    }
+  ]
+}
