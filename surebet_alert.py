@@ -38,8 +38,6 @@ LOGIN_RETRY_SEC = max(10, int(os.environ.get("LOGIN_RETRY_SEC", "30")))
 STATE_PATH = os.environ.get("STATE_PATH", "storage_state.json")
 SEEN_FILE = os.environ.get("SEEN_FILE", "seen.json")
 
-# Artık sadece Vbetholi filtresini kullanıyoruz.
-FILTER_NAME = os.environ.get("FILTER_NAME", "Vbetholi")
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
 
 LOG_BUFFER = deque(maxlen=200)
@@ -422,10 +420,33 @@ def get_page_diagnostics(page) -> dict:
     }
 
 
+def dismiss_cookie_notice(page) -> bool:
+    """Accept only the site's cookie notice and persist its consent state."""
+    try:
+        notice = page.locator("#cookies-banner-modal")
+        if not notice.is_visible():
+            return False
+        notice.get_by_text(re.compile(r"^Pek[aâ]l[aâ]$", re.I)).first.click(
+            timeout=5000
+        )
+        notice.wait_for(state="hidden", timeout=5000)
+    except Exception as e:
+        bot_log("[CEREZ] Bildirim kapatilamadi:", e)
+        return False
+
+    bot_log("[CEREZ] Pekala onayi verildi; bildirim kapatildi.")
+    try:
+        page.context.storage_state(path=STATE_PATH)
+    except Exception as e:
+        bot_log("[CEREZ] Onay oturum dosyasina kaydedilemedi:", e)
+    return True
+
+
 def send_page_screenshot(page, reason: str = "Manuel ekran goruntusu") -> None:
     """Send the viewport exactly as the headless bot currently sees it."""
     shot_path = os.path.join("/tmp", f"page_debug_{int(time.time())}.png")
     try:
+        dismiss_cookie_notice(page)
         page.evaluate("window.scrollTo(0, 0)")
         page.wait_for_timeout(120)
         details = get_page_diagnostics(page)
@@ -498,6 +519,7 @@ def auto_login(page, context) -> bool:
         if email.count() != 1 or password.count() != 1 or submit.count() != 1:
             raise RuntimeError("Login formu bulunamadi.")
 
+        dismiss_cookie_notice(page)
         email.fill(SITE_EMAIL, timeout=5000)
         password.fill(SITE_PASSWORD, timeout=5000)
         submit.click(timeout=10000)
@@ -542,6 +564,8 @@ def send_login_failure_once(page, reason: str) -> None:
 
 
 def ensure_scanning_on(page):
+    dismiss_cookie_notice(page)
+
     def has_pause_hint() -> bool:
         try:
             body = page.locator("body").inner_text(timeout=5000).lower()
@@ -564,23 +588,6 @@ def ensure_scanning_on(page):
         press_shift_p()
 
     return True
-
-
-def set_site_filter(page, filter_name: str) -> bool:
-    try:
-        filter_label = page.locator("text=Filtre").first
-        sel = filter_label.locator("xpath=following::select[1]")
-
-        sel.select_option(label=filter_name)
-        page.wait_for_timeout(800)
-
-        selected = sel.locator("option:checked").inner_text()
-        bot_log(f"[FILTRE] secildi -> {selected}")
-
-        return True
-    except Exception as e:
-        bot_log(f"[FILTRE] Seçilemedi: {filter_name} | Hata: {e}")
-        return False
 
 
 def get_site_filter(page) -> str | None:
@@ -797,9 +804,9 @@ def main():
         if startup_used_auto_login:
             send_telegram("🔐 Oturum otomatik olarak açıldı")
 
-        # Sadece tek filtre kullanıyoruz
-        set_site_filter(page, FILTER_NAME)
+        # Keep whichever filter the site/account currently has selected.
         ensure_scanning_on(page)
+        bot_log(f"[FILTRE] Sitenin mevcut secimi korunuyor: {get_site_filter(page) or '?'}")
 
         command_offset = initialize_telegram_offset()
         paused = False
@@ -865,7 +872,6 @@ def main():
                     if auto_login(page, context):
                         login_alert_sent = False
                         send_telegram("🔐 Oturum otomatik olarak yenilendi")
-                        set_site_filter(page, FILTER_NAME)
                         ensure_scanning_on(page)
                         continue
 
@@ -906,11 +912,10 @@ def main():
                             bot_log("[SAYFA] Teshis ekrani gonderilemedi:", e)
                         last_empty_alert = now
 
-                    # Refresh at most once per minute, then restore the filter.
+                    # Refresh at most once per minute; leave filter selection to the site.
                     if now - last_empty_recovery >= 60:
-                        bot_log("[SAYFA] Yenileniyor ve filtre tekrar seciliyor...")
+                        bot_log("[SAYFA] Yenileniyor; filtre secimi siteye birakiliyor...")
                         page.reload(wait_until="domcontentloaded", timeout=60000)
-                        set_site_filter(page, FILTER_NAME)
                         ensure_scanning_on(page)
                         last_empty_recovery = now
                     bad_empty_scans = 0
@@ -918,11 +923,12 @@ def main():
                     continue
 
                 max_p = max([x["profit"] for x in items], default=0)
-                bot_log(f"Gorulen satir: {len(items)} | Max kar: {max_p} | Filtre: {FILTER_NAME}")
+                current_filter = get_site_filter(page) or "?"
+                bot_log(f"Gorulen satir: {len(items)} | Max kar: {max_p} | Filtre: {current_filter}")
 
                 thr = threshold
                 hits = [x for x in items if x["profit"] >= thr]
-                bot_log(f"Eşik üstü: {len(hits)} (Filtre: {FILTER_NAME} | thr={thr})")
+                bot_log(f"Eşik üstü: {len(hits)} (Filtre: {current_filter} | thr={thr})")
 
                 hits.sort(key=lambda x: x["profit"], reverse=True)
 
@@ -933,7 +939,7 @@ def main():
                         continue
 
                     key = make_key(
-                        FILTER_NAME,
+                        current_filter,
                         h["profit"],
                         h["text"],
                         record_id=record_id,
